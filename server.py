@@ -13,27 +13,28 @@ class Server:
         self.nextSeq=0 #下一个包的序号
         self.acks=[]
         self.packets=[]
-        self.fileIteration=self.read_file_in_chunks(filename)#文件读取迭代对象
+        self.infile=open(filename,'rb')
     # 文件读取迭代器
-    def read_file_in_chunks(filename, chunk_size=1024):
-        with open(filename, 'rb') as file:
-            while True:
-                chunk = file.read(chunk_size)
-                if not chunk:
-                    break
-                yield chunk
+    def read_part(self, size):
+        data = self.infile.read(size)
+        if not data:
+            return None  # 文件已经读取完毕
+        return data
+    def read_close(self):
+        self.infile.close()
+
     # 根据相应大小获得对应的包
     def get_packets_by_size(self,size,seqno):
         packets = []
-        try:
-            for i in range(size):
-                file=next(self.fileIteration)
-                if seqno==0:
-                    packets.append(self.make_packet("start",seqno+i,file))
-                else :
-                    packets.append(self.make_packet("data",seqno+i,file))
-        except StopIteration:
-            pass
+        for i in range(size):
+            data=self.read_part(1024)
+            if data==None:
+                if i==0:
+                    return None #如果是第一个包就是空的，那就返回空
+                else:
+                    return packets
+            else:
+                packets.append(self.make_packet("data",seqno+i,data))
         return packets
 
     def handle_response(self,response_packet):
@@ -69,18 +70,25 @@ class Server:
             return None
     def start(self):
         ack=0
-        # timers=timer.timer()
-        isEnd=False
+        isReadEnd=False
+        isSendEnd=False
         timers=[]
-        while ack!=len(self.packets):
-            if not isEnd:
+        while not isReadEnd or not isSendEnd:
+
+            # 根据窗口大小读取文件 未发送的包小于窗口大小的两倍就读文件
+            if not isReadEnd and len(self.packets)-self.base<self.windowSize*2:
                 # 读取并打包窗口大小两倍的文件
-                self.packets.append(self.get_packets_by_size(self.windowSize*2,self.base))
-                # todo 细节处理读取到文件末尾
-                if len(self.packets) <self.windowSize*2:
-                    break
+                size=self.windowSize*2
+                packets=self.get_packets_by_size(size,self.base)
+                # 开始就没有
+                if packets==None:
+                    isReadEnd=True
+                # 读到一半没有了
+                elif len(packets)<size:
+                    isReadEnd=True
+                    self.packets.append(packets)
                 else:
-                    isEnd   
+                    self.packets.append(packets) 
             while self.nextSeq<self.base+self.windowSize:
                 #todo 
                 if ack>len(self.packets):
