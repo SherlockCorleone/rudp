@@ -52,7 +52,7 @@ class Client():
                     self.target=address
                     
                     # seqno,isEnd,data,checksum=self.split_message(data)
-                    seqno,isEnd,packets_no,data=self.split_message(data)
+                    seqno,flag,packets_no,data=self.split_message(data)
                     
                     if self.isDebug:
                         # print(seqno,isEnd,data,checksum)
@@ -68,8 +68,8 @@ class Client():
                     # 第一个包
                     # print("check:",check)
                     # print("checksum:",checksum)
-                    # if seqno ==self.expected_seqno and checksum == check:
-                    if cur_seqno==packets_no :
+                    if seqno ==self.expected_seqno :
+                    # if cur_seqno==packets_no :
                         self.expected_seqno =(self.expected_seqno+1)%256
                         #todo
                         cur_seqno = cur_seqno + 1
@@ -90,11 +90,15 @@ class Client():
                                 receiverReceivedSet[i%256]=0
                             else:
                                 break
-                        break         
+                        if flag==1:
+                            isEnd=True
+                            break     
+                        else :
+                            break  
                     # 收到窗口内的包，但不是第一个包，存在缓冲区里
-                    elif packets_no > cur_seqno and packets_no < cur_seqno+self.windowSize:
-                    # elif  (seqno-self.expected_seqno+256)%256 < self.windowSize :
-                        if  isEnd==1:
+                    # elif packets_no > cur_seqno and packets_no < cur_seqno+self.windowSize:
+                    elif  (seqno-self.expected_seqno+256)%256 < self.windowSize :
+                        if  flag==1:
                             receiverReceivedSet[seqno%256] = 0         # 若是最后一个包未按序到达，则丢弃并标记为未接受过
                             
                         else:
@@ -107,22 +111,23 @@ class Client():
                                 print("send ack:",self.expected_seqno)
                         data=bytes('', encoding='utf-8')
                         break
-                    elif(packets_no < cur_seqno):
+                    # elif(packets_no < cur_seqno):
+                    else:
                         ack_pkt = self.make_packet(seqno, self.expected_seqno)
                         self.send(ack_pkt)
                         if self.isDebug:
                             print("send ack:",seqno)
                         data=bytes('', encoding='utf-8')
                         break
-                    else:
-                        data=bytes('', encoding='utf-8')
-                        break
+                    # else:
+                        # data=bytes('', encoding='utf-8')
+                        # breaks
                 except socket.timeout:
                     if self.isDebug:
                         print("超时")
                     data=bytes('', encoding='utf-8') 
                     break  
-            if isEnd==1:
+            if isEnd:
                 self.outfile.close()
                 break
             self.outfile.write(data)

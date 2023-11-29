@@ -127,12 +127,12 @@ class Server:
                     ack_seqno,sack_seqno=self.split_ack_packet(data)
                     if self.isDebug:
                         print("收到ack：",ack_seqno)
-                        
+                    
                     # 记录发送窗口内的ack
-                    #todo
                     if(ack_seqno-self.base+self.bufferSize)%self.bufferSize<self.windowSize:
                         self.ACKs[ack_seqno]=1
-                    #最后一个ack
+                    
+                    #最后一个包的ack
                     if(ack_seqno==(self.lastSeq-1)%self.bufferSize and isReadEnd):
                         break
                     # if self.isDebug:  
