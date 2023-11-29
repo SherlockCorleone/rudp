@@ -1,117 +1,182 @@
-import signal
 import socket
-import threading
-# import timer
+import struct
+import hashlib
+import os
+import time
+import math
+#sudo tc qdisc add dev ens33 root netem delay 100ms 10ms 30%
+#sudo tc qdisc del dev ens33 root netem delay 100ms 10ms 30%
 class Server:
-    def __init__(self,dest,port,filename,timeout=0.5):
+    def __init__(self,dest,port,filename,timeout=0.5,isDebug=True):
+        self.isDebug=isDebug
         self.dest=dest
         self.port=port
         self.timeout=timeout
         self.socket=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-        self.windowSize=1 #窗口大小
+        self.windowSize=5 #窗口大小
         self.base=0 #窗口首元素序号
         self.nextSeq=0 #下一个包的序号
         self.acks=[]
-        self.packets=[]
+        self.bufferSize=256 #缓冲区大小
+        self.packets=[""] * self.bufferSize #待发送包缓冲区
+        self.sendPackets = [1] * self.bufferSize #发送标记缓冲区
+        self.ACKs = [1] * self.bufferSize #ACK标记缓冲区
+        self.ssthresh=15 #慢启动阈值
+        self.maxWindowSize=100 #int(self.bufferSize/2)-1 #最大窗口大小
+        self.dataSize=1024 #数据包大小
+
         self.infile=open(filename,'rb')
+        self.infile.seek(0, os.SEEK_END)
+        self.lastSeq = math.ceil(self.infile.tell()/self.dataSize)+1 #最后一个包的序号，默认为文件添加一个结尾包
+        self.infile.seek(0)
+
     # 文件读取迭代器
     def read_part(self, size):
         data = self.infile.read(size)
+
         if not data:
             return None  # 文件已经读取完毕
         return data
+    
+    # 文件关闭
     def read_close(self):
         self.infile.close()
-
-    # 根据相应大小获得对应的包
-    def get_packets_by_size(self,size,seqno):
-        packets = []
-        for i in range(size):
-            data=self.read_part(1024)
-            if data==None:
-                if i==0:
-                    return None #如果是第一个包就是空的，那就返回空
+    
+    #打包
+    def make_packet(self,flag,seqno,msg,num):
+        if msg !=None:
+            # m=hashlib.md5()
+            # m.update(msg)
+            # checksum=m.hexdigest().encode()
+            # return struct.pack('sBB',checksum,flag,seqno)+msg
+            return struct.pack('BBL',seqno,flag,num)+msg
+        else :
+            # return struct.pack('sBB','0'.encode(),flag,seqno)
+            return struct.pack('BBL',seqno,flag,num)
+    # 填满缓冲区
+    def fill_packets_buffer(self,num):
+        #遍历缓冲区
+        for i in range(self.bufferSize):
+            cur_num=(self.base+i)%self.bufferSize
+            #如果已经收到ack并且已经发送过了并且不在窗口内
+            if self.ACKs[cur_num]==1 and self.sendPackets[cur_num]==1 and not (cur_num+self.bufferSize-self.base)%self.bufferSize<self.windowSize:
+                self.sendPackets[cur_num]=0
+                self.ACKs[cur_num]=0
+                data=self.read_part(self.dataSize)
+                if data==None:
+                    self.packets[cur_num]=self.make_packet(1,cur_num,data,num)
+                    self.read_close()
+                    num+=1
+                    return True,num
                 else:
-                    return packets
-            else:
-                packets.append(self.make_packet("data",seqno+i,data))
-        return packets
-
-    def handle_response(self,response_packet):
-        #todo 校验
-        
-        handle_pieces=response_packet.split('|')
-        ack_type,ackno=handle_pieces
-    #处理ack
-    def handle_new_ack(self, ack):
-        self.base = ack
-    #处理超时
-    def handle_timeout(self, seqno):
-        self.nextSeq = seqno #seqno处超时，那下次就从seqno处开始发
+                    self.packets[cur_num]=self.make_packet(0,cur_num,data,num)
+                    num+=1
+        return False,num
+    def init_buffer(self,num):
+        #遍历缓冲区
+        for i in range(self.bufferSize):
+            cur_num=(self.base+i)%self.bufferSize
+            #如果已经收到ack并且已经发送过了
+            if self.ACKs[cur_num]==1 and self.sendPackets[cur_num]==1:
+                self.sendPackets[cur_num]=0
+                self.ACKs[cur_num]=0
+                data=self.read_part(self.dataSize)
+                if data==None:
+                    self.packets[cur_num]=self.make_packet(1,cur_num,data,num)
+                    self.read_close()
+                    num+=1
+                    return True,num
+                else:
+                    self.packets[cur_num]=self.make_packet(0,cur_num,data,num)
+                    num+=1
+        return False,num
     #send函数
     def send(self,message):
         self.socket.sendto(message,(self.dest,self.port))
-    #打包
-    def make_packet(self,msg_type,seqno,msg):
-        body= str(msg_type)+"|"+str(seqno)+"|"+msg+"|"
-        #todo 生成校验码
-        checksum=1
-        packet= body+checksum
-        return packet
-    def set_timer(self,seqno):
-        timer=threading.Timer(self.timeout,self.handle_timeout,args=(seqno,))
-        return timer
-    # 超时处理
-    def receive(self, timeout=None):
-        self.socket.settimeout(timeout)
-        try:
-            return self.socket.recv(4096)
-        except (socket.timeout, socket.error):
-            return None
+       
+    #分割ack包
+    def split_ack_packet(self, message):
+        ack=message[0]
+        sack=message[1]   
+        return ack,sack
+    
     def start(self):
-        ack=0
-        isReadEnd=False
-        isSendEnd=False
-        timers=[]
-        while not isReadEnd or not isSendEnd:
-
-            # 根据窗口大小读取文件 未发送的包小于窗口大小的两倍就读文件
-            if not isReadEnd and len(self.packets)-self.base<self.windowSize*2:
-                # 读取并打包窗口大小两倍的文件
-                size=self.windowSize*2
-                packets=self.get_packets_by_size(size,self.base)
-                # 开始就没有
-                if packets==None:
-                    isReadEnd=True
-                # 读到一半没有了
-                elif len(packets)<size:
-                    isReadEnd=True
-                    self.packets.append(packets)
-                else:
-                    self.packets.append(packets) 
-            while self.nextSeq<self.base+self.windowSize:
-                #todo 
-                if ack>len(self.packets):
-                    break
-
-                #发送数据包 并为每个包设置一个定时器
+        #记录包的序号
+        cur_seqno = 0
+        num=0
+        # 读取文件
+        isReadEnd,num=self.init_buffer(num)
+        
+        # 发送
+        while True:
+            #发送窗口内的包并且这个包还未发送过
+            while (self.nextSeq+self.bufferSize-self.base)%self.bufferSize<self.windowSize and cur_seqno<self.lastSeq and self.sendPackets[self.nextSeq]==0:
                 self.send(self.packets[self.nextSeq])
-                timer=self.set_timer(self.nextSeq)
-                timer.start()
-                timers.append(timer)
-                self.nextSeq+=1
-            #接受ack
-            message =self.receive(self.timeout) 
-            if message !=None:
-                message=message.decode()
-                msg_type,ack_data,data,checksum=self.split_packet(message)
-                if msg_type=="ack":
-                    ack=int(ack_data)
-                elif msg_type =="sack":
-                    ack_data=ack_data.splitt(";")
-                    ack=int(ack_data[0])
-                    acks[ack-1]=1
-              
-            
+                if self.isDebug:
+                    print("发送包：",self.nextSeq)
+                    print("cur_seqno:",cur_seqno)
+                    print("base",self.base)
+                self.sendPackets[self.nextSeq]=1
+                self.nextSeq = (self.nextSeq + 1) % self.bufferSize  
+                cur_seqno+=1
+            #处理ack和超时
+            self.socket.settimeout(self.timeout)
+            while True:
+                try:
+                    data,address=self.socket.recvfrom(4096)
+                    ack_seqno,sack_seqno=self.split_ack_packet(data)
+                    if self.isDebug:
+                        print("收到ack：",ack_seqno)
+                        
+                    # 记录发送窗口内的ack
+                    #todo
+                    if(ack_seqno-self.base+self.bufferSize)%self.bufferSize<self.windowSize:
+                        self.ACKs[ack_seqno]=1
+                    #最后一个ack
+                    if(ack_seqno==(self.lastSeq-1)%self.bufferSize and isReadEnd):
+                        break
+                    # if self.isDebug:  
+                    #     print(self.ACKs)
+                    #     print(self.sendPackets)
+                    if(self.base==ack_seqno):
+                        while (self.ACKs[self.base] == 1):
+                            self.base = (self.base + 1) % self.bufferSize  # 窗口滑动
+                        #慢启动
+                        if(self.windowSize<self.ssthresh):
+                            self.windowSize*=2
+                        #拥塞避免
+                        elif(self.windowSize>=self.ssthresh and self.windowSize<self.maxWindowSize):
+                            self.windowSize+=1
+                        if self.isDebug:
+                            print("窗口大小：",self.windowSize)
+                    #所有的ack都收到了
+                    if self.base == self.nextSeq: 
+                        self.socket.settimeout(None)
+                        break
+                except socket.timeout:
+                    if self.isDebug:
+                        print("超时，丢包")
+                    #快速重传      
+                    for i in range(self.base, self.base + self.windowSize):
+                        if (self.sendPackets[i%self.bufferSize] == 1 and self.ACKs[i%self.bufferSize] == 0):
+                            self.send(self.packets[i%self.bufferSize])
+                            if self.isDebug:
+                                print("重新发送包：",i%self.bufferSize)
+                    self.ssthresh =int(self.windowSize / 2)
+                    self.windowSize = self.ssthresh + 3
+                    self.socket.settimeout(self.timeout)
+            # 填缓冲区
+            if isReadEnd==False:
+                isReadEnd,num=self.fill_packets_buffer(num)
+            #发送完毕
+            if(cur_seqno>=self.lastSeq):
+                print("cur_seqno:",cur_seqno)
+                print("lastSeq:",self.lastSeq)
+                print("isReadEnd:",isReadEnd)
+                break
+def main():
+    server=Server("192.168.127.130",8888,"./server/Astralis.jpg")
+    server.start()
 
-
+if __name__=="__main__":
+    main()
