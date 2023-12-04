@@ -43,18 +43,13 @@ class Server:
         self.infile.close()
     
     #打包
-    def make_packet(self,flag,seqno,msg,num):
+    def make_packet(self,flag,seqno,msg):
         if msg !=None:
-            # m=hashlib.md5()
-            # m.update(msg)
-            # checksum=m.hexdigest().encode()
-            # return struct.pack('sBB',checksum,flag,seqno)+msg
-            return struct.pack('BBL',seqno,flag,num)+msg
+            return struct.pack('BB',seqno,flag)+msg
         else :
-            # return struct.pack('sBB','0'.encode(),flag,seqno)
-            return struct.pack('BBL',seqno,flag,num)
+            return struct.pack('BB',seqno,flag)
     # 填满缓冲区
-    def fill_packets_buffer(self,num):
+    def fill_packets_buffer(self):
         #遍历缓冲区
         for i in range(self.bufferSize):
             cur_num=(self.base+i)%self.bufferSize
@@ -64,15 +59,13 @@ class Server:
                 self.ACKs[cur_num]=0
                 data=self.read_part(self.dataSize)
                 if data==None:
-                    self.packets[cur_num]=self.make_packet(1,cur_num,data,num)
+                    self.packets[cur_num]=self.make_packet(1,cur_num,data)
                     self.read_close()
-                    num+=1
-                    return True,num
+                    return True
                 else:
-                    self.packets[cur_num]=self.make_packet(0,cur_num,data,num)
-                    num+=1
-        return False,num
-    def init_buffer(self,num):
+                    self.packets[cur_num]=self.make_packet(0,cur_num,data)   
+        return False
+    def init_buffer(self):
         #遍历缓冲区
         for i in range(self.bufferSize):
             cur_num=(self.base+i)%self.bufferSize
@@ -82,14 +75,12 @@ class Server:
                 self.ACKs[cur_num]=0
                 data=self.read_part(self.dataSize)
                 if data==None:
-                    self.packets[cur_num]=self.make_packet(1,cur_num,data,num)
+                    self.packets[cur_num]=self.make_packet(1,cur_num,data)
                     self.read_close()
-                    num+=1
-                    return True,num
+                    return True
                 else:
-                    self.packets[cur_num]=self.make_packet(0,cur_num,data,num)
-                    num+=1
-        return False,num
+                    self.packets[cur_num]=self.make_packet(0,cur_num,data)
+        return False
     #send函数
     def send(self,message):
         self.socket.sendto(message,(self.dest,self.port))
@@ -103,19 +94,21 @@ class Server:
     def start(self):
         #记录包的序号
         cur_seqno = 0
-        num=0
         # 读取文件
-        isReadEnd,num=self.init_buffer(num)
+        isReadEnd=self.init_buffer()
         
         # 发送
         while True:
             #发送窗口内的包并且这个包还未发送过
-            while (self.nextSeq+self.bufferSize-self.base)%self.bufferSize<self.windowSize and cur_seqno<self.lastSeq and self.sendPackets[self.nextSeq]==0:
-                self.send(self.packets[self.nextSeq])
+            while (self.nextSeq+self.bufferSize-self.base)%self.bufferSize<self.windowSize and cur_seqno<self.lastSeq and self.sendPackets[self.nextSeq]==0:	
+                try:
+                    self.send(self.packets[self.nextSeq])
+                except OSError:
+                    print("网络阻塞")
+                    continue
                 if self.isDebug:
                     print("发送包：",self.nextSeq)
                     print("cur_seqno:",cur_seqno)
-                    print("base",self.base)
                 self.sendPackets[self.nextSeq]=1
                 self.nextSeq = (self.nextSeq + 1) % self.bufferSize  
                 cur_seqno+=1
@@ -135,9 +128,7 @@ class Server:
                     #最后一个包的ack
                     if(ack_seqno==(self.lastSeq-1)%self.bufferSize and isReadEnd):
                         break
-                    # if self.isDebug:  
-                    #     print(self.ACKs)
-                    #     print(self.sendPackets)
+                    
                     if(self.base==ack_seqno):
                         while (self.ACKs[self.base] == 1):
                             self.base = (self.base + 1) % self.bufferSize  # 窗口滑动
@@ -159,7 +150,11 @@ class Server:
                     #快速重传      
                     for i in range(self.base, self.base + self.windowSize):
                         if (self.sendPackets[i%self.bufferSize] == 1 and self.ACKs[i%self.bufferSize] == 0):
-                            self.send(self.packets[i%self.bufferSize])
+                            try:
+                                self.send(self.packets[i%self.bufferSize])
+                            except OSError:
+                                print("网络阻塞")
+                                continue
                             if self.isDebug:
                                 print("重新发送包：",i%self.bufferSize)
                     self.ssthresh =int(self.windowSize / 2)
@@ -167,15 +162,12 @@ class Server:
                     self.socket.settimeout(self.timeout)
             # 填缓冲区
             if isReadEnd==False:
-                isReadEnd,num=self.fill_packets_buffer(num)
+                isReadEnd=self.fill_packets_buffer()
             #发送完毕
             if(cur_seqno>=self.lastSeq):
-                print("cur_seqno:",cur_seqno)
-                print("lastSeq:",self.lastSeq)
-                print("isReadEnd:",isReadEnd)
                 break
 def main():
-    server=Server("192.168.127.130",8888,"./server/Astralis.jpg")
+    server=Server("192.168.127.130",8888,"./output.bin")
     server.start()
 
 if __name__=="__main__":
